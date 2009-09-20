@@ -1,62 +1,187 @@
 <?php
 
-// loune 25/3/2006, updated 22/08/2009
+// loune 25/3/2006, 22/08/2009, 20/09/2009
 // For more information see:
-// http://siphon9.net/loune/2007/10/simple-lightweight-ntlm-in-php/
-// 
-// This script is obsolete, you should see
 // http://siphon9.net/loune/2009/09/ntlm-authentication-in-php-now-with-ntlmv2-hash-checking/
 //
 
-// NTLM specs http://davenport.sourceforge.net/ntlm.html
+/*
 
-$headers = apache_request_headers();
+php ntlm authentication library
 
-if (!isset($headers['Authorization'])){
-	header('HTTP/1.1 401 Unauthorized');
-	header('WWW-Authenticate: NTLM');
-	exit;
+Copyright (c) 2009 Loune Lam
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+Usage:
+
+	include('ntlm.php');
+
+	function get_ntlm_user_hash($user) {
+		$userdb = array('loune'=>'test', 'user1'=>'password');
+		
+		if (!isset($userdb[strtolower($user)]))
+			return false;	
+		return mhash(MHASH_MD4, ntlm_utf8_to_utf16le($userdb[strtolower($user)]));
+	}
+
+	session_start();
+	$auth = ntlm_prompt("testwebsite", "testdomain", "mycomputer", "testdomain.local", "mycomputer.local", "get_ntlm_user_hash");
+
+	if ($auth['authenticated']) {
+		print "You are authenticated as $auth[username] from $auth[domain]/$auth[workstation]";
+	}
+
+*/
+
+function ntlm_utf8_to_utf16le($str) {
+	//$result = "";
+	//for ($i = 0; $i < strlen($str); $i++)
+	//    $result .= $str[$i]."\0";
+	//return $result;
+	return iconv('UTF-8', 'UTF-16LE', $str);
 }
 
-$auth = $headers['Authorization'];
+function ntlm_av_pair($type, $utf16) {
+	return pack('v', $type).pack('v', strlen($utf16)).$utf16;
+}
 
-if (substr($auth,0,5) == 'NTLM ') {
-	$msg = base64_decode(substr($auth, 5));
-	if (substr($msg, 0, 8) != "NTLMSSP\x00")
-		die('error header not recognised');
+function ntlm_field_value($msg, $start, $decode_utf16 = true) {
+	$len = (ord($msg[$start+1]) * 256) + ord($msg[$start]);
+	$off = (ord($msg[$start+5]) * 256) + ord($msg[$start+4]);
+	$result = substr($msg, $off, $len);
+	if ($decode_utf16) {
+		//$result = str_replace("\0", '', $result);
+		$result = iconv('UTF-16LE', 'UTF-8', $result);
+	}
+	return $result;
+}
 
-	if ($msg[8] == "\x01") {
-		$msg2 = "NTLMSSP\x00\x02\x00\x00\x00".
-		    "\x00\x00\x00\x00". // target name len/alloc
-			"\x00\x00\x00\x00". // target name offset
-			"\x01\x02\x81\x00". // flags
-			"\x00\x00\x00\x00\x00\x00\x00\x00". // challenge
-			"\x00\x00\x00\x00\x00\x00\x00\x00". // context
-			"\x00\x00\x00\x00\x00\x00\x00\x00"; // target info len/alloc/offset
+function ntlm_hmac_md5($key, $msg) {
+	$blocksize = 64;
+	if (strlen($key) > $blocksize)
+		$key = pack('H*', md5($key));
+	
+	$key = str_pad($key, $blocksize, "\0");
+	$ipadk = $key ^ str_repeat("\x36", $blocksize);
+	$opadk = $key ^ str_repeat("\x5c", $blocksize);
+	return pack('H*', md5($opadk.pack('H*', md5($ipadk.$msg))));
+}
 
+function ntlm_get_random_bytes($length) {
+	$result = "";
+	for ($i = 0; $i < $length; $i++) {
+		$result .= chr(rand(0, 255));
+	}
+	return $result;
+}
+
+function ntlm_get_challenge_msg($msg, $challenge, $targetname, $domain, $computer, $dnsdomain, $dnscomputer) {
+	$domain = ntlm_field_value($msg, 16);
+	$ws = ntlm_field_value($msg, 24);
+	$tdata = ntlm_av_pair(2, ntlm_utf8_to_utf16le($domain)).ntlm_av_pair(1, ntlm_utf8_to_utf16le($computer)).ntlm_av_pair(4, ntlm_utf8_to_utf16le($dnsdomain)).ntlm_av_pair(3, ntlm_utf8_to_utf16le($dnscomputer))."\0\0\0\0\0\0\0\0";
+	$tname = ntlm_utf8_to_utf16le($targetname);
+
+	$msg2 = "NTLMSSP\x00\x02\x00\x00\x00".
+		pack('vvV', strlen($tname), strlen($tname), 48). // target name len/alloc/offset
+		"\x01\x02\x81\x00". // flags
+		$challenge. // challenge
+		"\x00\x00\x00\x00\x00\x00\x00\x00". // context
+		pack('vvV', strlen($tdata), strlen($tdata), 48 + strlen($tname)). // target info len/alloc/offset
+		$tname.$tdata;
+	return $msg2;
+}
+
+function ntlm_verify_hash($challenge, $user, $domain, $workstation, $clientblobhash, $clientblob, $get_ntlm_user_hash) {
+
+	$md4hash = $get_ntlm_user_hash($user);
+	if (!$md4hash)
+		return false;
+	$ntlmv2hash = ntlm_hmac_md5($md4hash, ntlm_utf8_to_utf16le(strtoupper($user).$domain));
+	$blobhash = ntlm_hmac_md5($ntlmv2hash, $challenge.$clientblob);
+	
+	/* print bin2hex($challenge )."<br>";
+	print bin2hex($clientblob )."<br>";
+	print bin2hex($_SESSION['tdata'])."<br>";
+	print bin2hex($clientblobhash )."<br>";
+	print bin2hex($md4hash )."<br>";
+	print bin2hex($ntlmv2hash)."<br>";
+	print bin2hex($blobhash)."<br>"; */
+	
+	return ($blobhash == $clientblobhash);
+}
+
+function ntlm_parse_response_msg($msg, $challenge, $get_ntlm_user_hash_callback, $ntlm_verify_hash_callback) {
+	$user = ntlm_field_value($msg, 36);
+	$domain = ntlm_field_value($msg, 28);
+	$workstation = ntlm_field_value($msg, 44);
+	$ntlmresponse = ntlm_field_value($msg, 20, false);
+	//$blob = "\x01\x01\x00\x00\x00\x00\x00\x00".$timestamp.$nonce."\x00\x00\x00\x00".$tdata;
+	$clientblob = substr($ntlmresponse, 16);
+	$clientblobhash = substr($ntlmresponse, 0, 16);
+	
+	// print bin2hex($msg)."<br>";
+	
+	if (!$ntlm_verify_hash_callback($challenge, $user, $domain, $workstation, $clientblobhash, $clientblob, $get_ntlm_user_hash_callback))
+		return array('authenticated' => false, 'username' => $user, 'domain' => $domain, 'workstation' => $workstation);
+	return array('authenticated' => true, 'username' => $user, 'domain' => $domain, 'workstation' => $workstation);
+}
+
+function ntlm_prompt($targetname, $domain, $computer, $dnsdomain, $dnscomputer, $get_ntlm_user_hash_callback, $ntlm_verify_hash_callback = 'ntlm_verify_hash', $failmsg = "<h1>Authentication Required</h1>") {
+	$headers = apache_request_headers();
+	
+	if (!isset($headers['Authorization'])){
 		header('HTTP/1.1 401 Unauthorized');
-		header('WWW-Authenticate: NTLM '.trim(base64_encode($msg2)));
+		header('WWW-Authenticate: NTLM');
+		print $failmsg;
 		exit;
 	}
-	else if ($msg[8] == "\x03") {
-		function get_msg_str($msg, $start, $unicode = true) {
-			$len = (ord($msg[$start+1]) * 256) + ord($msg[$start]);
-			$off = (ord($msg[$start+5]) * 256) + ord($msg[$start+4]);
-			if ($unicode)
-				return str_replace("\0", '', substr($msg, $off, $len));
-			else
-				return substr($msg, $off, $len);
+
+	$auth = $headers['Authorization'];
+
+	if (substr($auth,0,5) == 'NTLM ') {
+		$msg = base64_decode(substr($auth, 5));
+		if (substr($msg, 0, 8) != "NTLMSSP\x00")
+			die('error header not recognised');
+
+		if ($msg[8] == "\x01") {
+			$_SESSION['ntlm_server_challenge'] = ntlm_get_random_bytes(8);
+			header('HTTP/1.1 401 Unauthorized');
+			$msg2 = ntlm_get_challenge_msg($msg, $_SESSION['ntlm_server_challenge'], $targetname, $domain, $computer, $dnsdomain, $dnscomputer);
+			header('WWW-Authenticate: NTLM '.trim(base64_encode($msg2)));
+			//print bin2hex($msg2);
+			exit;
 		}
-		$user = get_msg_str($msg, 36);
-		$domain = get_msg_str($msg, 28);
-		$workstation = get_msg_str($msg, 44);
-
-
-		print "You are $user from $domain/$workstation";
+		else if ($msg[8] == "\x03") {
+			$auth = ntlm_parse_response_msg($msg, $_SESSION['ntlm_server_challenge'], $get_ntlm_user_hash_callback, $ntlm_verify_hash_callback);
+			unset($_SESSION['ntlm_server_challenge']);
+			
+			if (!$auth['authenticated']) {
+				header('HTTP/1.1 401 Unauthorized');
+				header('WWW-Authenticate: NTLM');
+				print $failmsg;
+				exit;
+			}
+			return $auth;
+		}
 	}
 }
-
-
 
 
 ?>

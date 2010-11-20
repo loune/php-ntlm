@@ -8,8 +8,9 @@
 /*
 
 php ntlm authentication library
+Version 1.1
 
-Copyright (c) 2009 Loune Lam
+Copyright (c) 2009-2010 Loune Lam
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -38,7 +39,7 @@ Usage:
 		
 		if (!isset($userdb[strtolower($user)]))
 			return false;	
-		return mhash(MHASH_MD4, ntlm_utf8_to_utf16le($userdb[strtolower($user)]));
+		return ntlm_md4(ntlm_utf8_to_utf16le($userdb[strtolower($user)]));
 	}
 
 	session_start();
@@ -48,6 +49,10 @@ Usage:
 		print "You are authenticated as $auth[username] from $auth[domain]/$auth[workstation]";
 	}
 
+To logout, use the code:
+
+	ntlm_unset_auth();
+
 */
 
 function ntlm_utf8_to_utf16le($str) {
@@ -56,6 +61,12 @@ function ntlm_utf8_to_utf16le($str) {
 	//    $result .= $str[$i]."\0";
 	//return $result;
 	return iconv('UTF-8', 'UTF-16LE', $str);
+}
+
+function ntlm_md4($s) {
+	if (function_exists('mhash'))
+		return mhash(MHASH_MD4, $s);
+	return pack('H*', hash('md4', $s));
 }
 
 function ntlm_av_pair($type, $utf16) {
@@ -116,14 +127,16 @@ function ntlm_verify_hash($challenge, $user, $domain, $workstation, $clientblobh
 	$ntlmv2hash = ntlm_hmac_md5($md4hash, ntlm_utf8_to_utf16le(strtoupper($user).$domain));
 	$blobhash = ntlm_hmac_md5($ntlmv2hash, $challenge.$clientblob);
 	
-	/* print bin2hex($challenge )."<br>";
+	/* print $domain ."<br>";
+	print $user ."<br>";
+	print bin2hex($challenge )."<br>";
 	print bin2hex($clientblob )."<br>";
 	print bin2hex($_SESSION['tdata'])."<br>";
 	print bin2hex($clientblobhash )."<br>";
 	print bin2hex($md4hash )."<br>";
 	print bin2hex($ntlmv2hash)."<br>";
-	print bin2hex($blobhash)."<br>"; */
-	
+	print bin2hex($blobhash)."<br>"; die; */
+
 	return ($blobhash == $clientblobhash);
 }
 
@@ -143,41 +156,71 @@ function ntlm_parse_response_msg($msg, $challenge, $get_ntlm_user_hash_callback,
 	return array('authenticated' => true, 'username' => $user, 'domain' => $domain, 'workstation' => $workstation);
 }
 
+function ntlm_unset_auth() {
+	unset ($_SESSION['_ntlm_auth']);
+}
+
 function ntlm_prompt($targetname, $domain, $computer, $dnsdomain, $dnscomputer, $get_ntlm_user_hash_callback, $ntlm_verify_hash_callback = 'ntlm_verify_hash', $failmsg = "<h1>Authentication Required</h1>") {
-	$headers = apache_request_headers();
+
+	$auth_header = isset($_SERVER['HTTP_AUTHORIZATION']) ? $_SERVER['HTTP_AUTHORIZATION'] : null;
+	if ($auth_header == null && function_exists('apache_request_headers')) {
+		$headers = apache_request_headers();
+		$auth_header = isset($headers['Authorization']) ? $headers['Authorization'] : null;
+	}
 	
-	if (!isset($headers['Authorization'])){
+	if (isset($_SESSION['_ntlm_auth']))
+		return $_SESSION['_ntlm_auth'];
+	
+	// post data retention, looks like not needed	
+	/*if ($_SERVER['REQUEST_METHOD'] == 'POST') {
+		$_SESSION['_ntlm_post_data'] = $_POST;
+	}*/
+	
+	if (!$auth_header) {
 		header('HTTP/1.1 401 Unauthorized');
 		header('WWW-Authenticate: NTLM');
 		print $failmsg;
 		exit;
 	}
 
-	$auth = $headers['Authorization'];
-
-	if (substr($auth,0,5) == 'NTLM ') {
-		$msg = base64_decode(substr($auth, 5));
-		if (substr($msg, 0, 8) != "NTLMSSP\x00")
-			die('error header not recognised');
+	if (substr($auth_header,0,5) == 'NTLM ') {
+		$msg = base64_decode(substr($auth_header, 5));
+		if (substr($msg, 0, 8) != "NTLMSSP\x00") {
+			unset($_SESSION['_ntlm_post_data']);
+			die('NTLM error header not recognised');
+		}
 
 		if ($msg[8] == "\x01") {
-			$_SESSION['ntlm_server_challenge'] = ntlm_get_random_bytes(8);
+			$_SESSION['_ntlm_server_challenge'] = ntlm_get_random_bytes(8);
 			header('HTTP/1.1 401 Unauthorized');
-			$msg2 = ntlm_get_challenge_msg($msg, $_SESSION['ntlm_server_challenge'], $targetname, $domain, $computer, $dnsdomain, $dnscomputer);
+			$msg2 = ntlm_get_challenge_msg($msg, $_SESSION['_ntlm_server_challenge'], $targetname, $domain, $computer, $dnsdomain, $dnscomputer);
 			header('WWW-Authenticate: NTLM '.trim(base64_encode($msg2)));
 			//print bin2hex($msg2);
 			exit;
 		}
 		else if ($msg[8] == "\x03") {
-			$auth = ntlm_parse_response_msg($msg, $_SESSION['ntlm_server_challenge'], $get_ntlm_user_hash_callback, $ntlm_verify_hash_callback);
-			unset($_SESSION['ntlm_server_challenge']);
+			$auth = ntlm_parse_response_msg($msg, $_SESSION['_ntlm_server_challenge'], $get_ntlm_user_hash_callback, $ntlm_verify_hash_callback);
+			unset($_SESSION['_ntlm_server_challenge']);
 			
 			if (!$auth['authenticated']) {
 				header('HTTP/1.1 401 Unauthorized');
 				header('WWW-Authenticate: NTLM');
+				//unset($_SESSION['_ntlm_post_data']);
 				print $failmsg;
 				exit;
 			}
+			
+			// post data retention looks like not needed
+			/*if (isset($_SESSION['_ntlm_post_data'])) {
+				foreach ($_SESSION['_ntlm_post_data'] as $k => $v) {
+					$_REQUEST[$k] = $v;
+					$_POST[$k] = $v;
+				}
+				$_SERVER['REQUEST_METHOD'] = 'POST';
+				unset($_SESSION['_ntlm_post_data']);
+			}*/
+			
+			$_SESSION['_ntlm_auth'] = $auth;
 			return $auth;
 		}
 	}

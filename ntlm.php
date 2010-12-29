@@ -8,7 +8,7 @@
 /*
 
 php ntlm authentication library
-Version 1.1
+Version 1.2
 
 Copyright (c) 2009-2010 Loune Lam
 
@@ -52,8 +52,20 @@ Usage:
 To logout, use the code:
 
 	ntlm_unset_auth();
+	
+SAMBA
+-----	
+To use this library with samba, please read the instructions inside verifyntlm.c 
+to compile the verifyntlm helper. Use the ntlm.php library as above but omit the
+get_ntlm_user_hash function and replace the ntlm_prompt line with this one:
+
+	$auth = ntlm_prompt("testwebsite", "testdomain", "mycomputer", "testdomain.local", "mycomputer.local", null, "ntlm_verify_hash_smb");
+	
+For more, see http://siphon9.net/loune/2010/12/php-ntlm-integration-with-samba/
 
 */
+
+$ntlm_verifyntlmpath = '/sbin/verifyntlm';
 
 function ntlm_utf8_to_utf16le($str) {
 	//$result = "";
@@ -117,6 +129,13 @@ function ntlm_get_challenge_msg($msg, $challenge, $targetname, $domain, $compute
 		pack('vvV', strlen($tdata), strlen($tdata), 48 + strlen($tname)). // target info len/alloc/offset
 		$tname.$tdata;
 	return $msg2;
+}
+
+function ntlm_verify_hash_smb($challenge, $user, $domain, $workstation, $clientblobhash, $clientblob, $get_ntlm_user_hash) {
+	global $ntlm_verifyntlmpath;
+	$cmd = bin2hex($challenge)." ".bin2hex(ntlm_utf8_to_utf16le(strtoupper($user)))." ".bin2hex(ntlm_utf8_to_utf16le($domain))." ".bin2hex(ntlm_utf8_to_utf16le($workstation))." ".bin2hex($clientblobhash)." ".bin2hex($clientblob);
+
+	return (`$ntlm_verifyntlmpath $cmd` == "1\n");
 }
 
 function ntlm_verify_hash($challenge, $user, $domain, $workstation, $clientblobhash, $clientblob, $get_ntlm_user_hash) {

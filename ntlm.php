@@ -146,11 +146,11 @@ function ntlm_verify_hash($challenge, $user, $domain, $workstation, $clientblobh
 	$ntlmv2hash = ntlm_hmac_md5($md4hash, ntlm_utf8_to_utf16le(strtoupper($user).$domain));
 	$blobhash = ntlm_hmac_md5($ntlmv2hash, $challenge.$clientblob);
 	
-	/* print $domain ."<br>";
+	/*
+	print $domain ."<br>";
 	print $user ."<br>";
 	print bin2hex($challenge )."<br>";
 	print bin2hex($clientblob )."<br>";
-	print bin2hex($_SESSION['tdata'])."<br>";
 	print bin2hex($clientblobhash )."<br>";
 	print bin2hex($md4hash )."<br>";
 	print bin2hex($ntlmv2hash)."<br>";
@@ -167,11 +167,15 @@ function ntlm_parse_response_msg($msg, $challenge, $get_ntlm_user_hash_callback,
 	//$blob = "\x01\x01\x00\x00\x00\x00\x00\x00".$timestamp.$nonce."\x00\x00\x00\x00".$tdata;
 	$clientblob = substr($ntlmresponse, 16);
 	$clientblobhash = substr($ntlmresponse, 0, 16);
+
+	if (substr($clientblob, 0, 8) != "\x01\x01\x00\x00\x00\x00\x00\x00") {
+		return array('authenticated' => false, 'error' => 'NTLMv2 response required. Please force your client to use NTLMv2.');
+	}
 	
 	// print bin2hex($msg)."<br>";
 	
 	if (!$ntlm_verify_hash_callback($challenge, $user, $domain, $workstation, $clientblobhash, $clientblob, $get_ntlm_user_hash_callback))
-		return array('authenticated' => false, 'username' => $user, 'domain' => $domain, 'workstation' => $workstation);
+		return array('authenticated' => false, 'error' => 'Incorrect username or password.', 'username' => $user, 'domain' => $domain, 'workstation' => $workstation);
 	return array('authenticated' => true, 'username' => $user, 'domain' => $domain, 'workstation' => $workstation);
 }
 
@@ -226,6 +230,7 @@ function ntlm_prompt($targetname, $domain, $computer, $dnsdomain, $dnscomputer, 
 				header('WWW-Authenticate: NTLM');
 				//unset($_SESSION['_ntlm_post_data']);
 				print $failmsg;
+				print $auth['error'];
 				exit;
 			}
 			
